@@ -1,0 +1,188 @@
+---
+title: "Example of GAM spline fit with simultaneous CI"
+output:
+  html_notebook:
+    highlight: haddock
+    theme: default
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+
+
+# Preamble
+```{r preamble}
+library(here)
+here()
+
+# load packages
+library(tidyverse)
+library(mgcv)
+
+# bright color blind palette:  https://personal.sron.nl/~pault/ 
+cblack <- "#000004FF"
+cblue <- "#3366AA"
+cteal <- "#11AA99"
+cgreen <- "#66AA55"
+cchartr <- "#CCCC55"
+cmagent <- "#992288"
+cred <- "#EE3333"
+corange <- "#EEA722"
+cyellow <- "#FFEE33"
+cgrey <- "#777777"
+
+```
+
+
+# Load a dataset
+
+This is publicly available antibody data from Cambodia based on this article:
+https://wwwnc.cdc.gov/eid/article/24/7/17-1928-f1
+
+Dataset is available here:
+https://osf.io/2kr8b/
+
+```{r load data}
+#-------------------------------
+# load the cambodia serology data
+#-------------------------------
+d <- readRDS(here("data","cambodia_serology_public.rds"))
+
+#-------------------------------
+# select tetanus response
+# and convert to log10 MFI
+# format cluster ID to factor
+# create a dummy variable equal
+# to 1 for all obs as a trick to
+# get marginal predictions by
+# age while still including REs
+# for cluster
+#-------------------------------
+d <- d %>%
+  select(psuid,age,ttmb) %>%
+  mutate(psuid=factor(psuid),
+         logmfi=log10(ifelse(ttmb<0,1,ttmb)),
+         dummy=1)
+
+```
+
+
+# Function for a simultaneous CI around a spline curve
+```{r simultaneous CI}
+#----------------------------------
+# simulataneous CIs for GAMs
+# estimated by resampling the 
+# Baysian posterior estimates of
+# the variance-covariance matrix
+# assuming that it is multivariate normal
+# the function below also estimates 
+# the unconditional variance-covariance
+# matrix, Vb=vcov(x,unconditional=TRUE), 
+# which allows for undertainty in the actual
+# estimated mean as well 
+# (Marra & Wood 2012 Scandinavian Journal of Statistics, 
+#  Vol. 39: 53–74, 2012, doi: 10.1111/j.1467-9469.2011.00760.x )
+# simultaneous CIs provide much better coverage than pointwise CIs
+# see: http://www.fromthebottomoftheheap.net/2016/12/15/simultaneous-interval-revisited/
+#----------------------------------
+
+gamCI <- function(m,newdata,nreps=10000) {
+  require(mgcv)
+  require(dplyr)
+  Vb <- vcov(m,unconditional = TRUE)
+  pred <- predict(m, newdata, se.fit = TRUE)
+  fit <- pred$fit
+  se.fit <- pred$se.fit
+  BUdiff <- MASS::mvrnorm(n=nreps, mu = rep(0, nrow(Vb)), Sigma = Vb)
+  Cg <- predict(m, newdata, type = "lpmatrix")
+  simDev <- Cg %*% t(BUdiff)
+  absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+  masd <- apply(absDev, 2L, max)
+  crit <- quantile(masd, prob = 0.95, type = 8)
+  pred <- data.frame(newdata,fit=pred$fit,se.fit=pred$se.fit)
+  pred <- mutate(pred,
+                 uprP = fit + (2 * se.fit),
+                 lwrP = fit - (2 * se.fit),
+                 uprS = fit + (crit * se.fit),
+                 lwrS = fit - (crit * se.fit)
+  )
+  return(pred)
+}
+
+```
+
+# Estimate mean antibody level by age
+
+```{r agecurve}
+#----------------------------------
+# ignore clustering (i.e., no random effect for cluster)
+#----------------------------------
+# fit GAM with a spline for age
+fit1 <- mgcv::gam(logmfi~s(age, bs="cr"),data=d)
+# estimate simultaneous CIs around the curve
+fit1ci <- gamCI(m=fit1,newdata=d,nreps=10000)
+
+
+#----------------------------------
+# add a random effect for clustering
+#----------------------------------
+# fit GAM with a spline for age
+fit2 <- mgcv::gam(logmfi~s(age, bs="cr")+s(psuid,bs="re",by=dummy),data=d)
+# estimate simultaneous CIs around the curve
+# for the prediction data, set the dummy to 0 to 
+# zero out all of the random effects
+# see posts on Stack Exchange for explanation:
+# https://stats.stackexchange.com/questions/131106/predicting-with-random-effects-in-mgcv-gam/131116#131116
+# https://stats.stackexchange.com/questions/189384/predicting-mean-smooth-in-gam-with-smooth-by-random-factor-interaction
+newd <- d %>% mutate(dummy=0)
+fit2ci <- gamCI(m=fit2,newdata=newd,nreps=10000)
+
+```
+
+# Plot results
+
+The simultaneous CIs increase the width of the band.
+
+In this particular example, accounting for cluster has almost no effect on the width of the simulaneous CIs.  Possibly because there are 100 clusters, so sample size is still very large.
+
+```{r figures, fig.width=3, fig.height=2}
+
+p1 <- ggplot(data=fit1ci,aes(x=age)) +
+  # geom_point(aes(y=logmfi),alpha=0.2,color=cblack) +
+  geom_line(aes(y=fit),color=cblack) +
+  geom_ribbon(aes(ymin=lwrS,ymax=uprS),alpha=0.2,color=NA,fill=cred) +
+  geom_ribbon(aes(ymin=lwrP,ymax=uprP),alpha=0.3,color=NA,fill=cred) +
+  labs(title="Tetanus antibody response by age, ignoring clustering") +
+  theme_minimal()
+p1
+
+p2 <- ggplot(data=fit2ci,aes(x=age)) +
+  # geom_point(aes(y=logmfi),alpha=0.2,color=cblack) +
+  geom_line(aes(y=fit),color=cblack) +
+  geom_ribbon(aes(ymin=lwrS,ymax=uprS),alpha=0.2,color=NA,fill=cteal) +
+  geom_ribbon(aes(ymin=lwrP,ymax=uprP),alpha=0.3,color=NA,fill=cteal) +
+  labs(title="Tetanus antibody response by age, accounting for clustering") +
+  theme_minimal()
+p2
+
+p3 <- ggplot(data=fit1ci,aes(x=age)) +
+  geom_line(aes(y=fit),color=cblack) +
+  geom_ribbon(aes(ymin=lwrP,ymax=uprP),alpha=0.2,color=cgrey,fill=cteal) +
+  geom_ribbon(data=fit2ci,aes(ymin=lwrP,ymax=uprP),alpha=0.3,color=cgrey,lty="dashed",fill=cgreen) +
+  labs(title="Tetanus antibody response by age, comparison of pointwise CIs") +
+  theme_minimal()
+p3
+
+p4 <- ggplot(data=fit1ci,aes(x=age)) +
+  geom_line(aes(y=fit),color=cblack) +
+  geom_ribbon(aes(ymin=lwrS,ymax=uprS),alpha=0.2,color=cgrey,fill=cteal) +
+  geom_ribbon(data=fit2ci,aes(ymin=lwrS,ymax=uprS),alpha=0.3,color=cgrey,lty="dashed",fill=cgreen) +
+  labs(title="Tetanus antibody response by age, comparison of simultaneous CIs") +
+  theme_minimal()
+p4
+```
+
+
+
